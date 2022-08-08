@@ -1,8 +1,5 @@
 name: Build docker image
 
-permissions:
-  contents: read
-
 on:
   release:
     types:
