@@ -25,9 +25,15 @@ from parsedmarc import get_dmarc_reports_from_mailbox, watch_inbox, \
 from parsedmarc.mail import IMAPConnection, MSGraphConnection, GmailConnection
 from parsedmarc.mail.graph import AuthMethod
 
+from parsedmarc.log import logger
 from parsedmarc.utils import is_mbox
 
-logger = logging.getLogger("parsedmarc")
+formatter = logging.Formatter(
+    fmt='%(levelname)8s:%(filename)s:%(lineno)d:%(message)s',
+    datefmt='%Y-%m-%d:%H:%M:%S')
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 
 def _str_to_list(s):
@@ -71,6 +77,12 @@ def _main():
 
         if not opts.silent:
             print(output_str)
+        if opts.output:
+            save_output(results, output_directory=opts.output,
+                        aggregate_json_filename=opts.aggregate_json_filename,
+                        forensic_json_filename=opts.forensic_json_filename,
+                        aggregate_csv_filename=opts.aggregate_csv_filename,
+                        forensic_csv_filename=opts.forensic_csv_filename)
         if opts.kafka_hosts:
             try:
                 ssl_context = None
@@ -270,6 +282,7 @@ def _main():
                      mailbox_delete=False,
                      mailbox_test=False,
                      mailbox_batch_size=None,
+                     mailbox_check_timeout=30,
                      imap_host=None,
                      imap_skip_certificate_verification=False,
                      imap_ssl=True,
@@ -328,6 +341,7 @@ def _main():
                      gmail_api_token_file=None,
                      gmail_api_include_spam_trash=False,
                      gmail_api_scopes=[],
+                     gmail_api_oauth2_port=8080,
                      log_file=args.log_file,
                      n_procs=1,
                      chunk_size=1,
@@ -405,6 +419,9 @@ def _main():
                 opts.mailbox_test = mailbox_config.getboolean("test")
             if "batch_size" in mailbox_config:
                 opts.mailbox_batch_size = mailbox_config.getint("batch_size")
+            if "check_timeout" in mailbox_config:
+                opts.mailbox_check_timeout = mailbox_config.getint(
+                    "check_timeout")
 
         if "imap" in config.sections():
             imap_config = config["imap"]
@@ -727,6 +744,9 @@ def _main():
                                      default_gmail_api_scope)
             opts.gmail_api_scopes = \
                 _str_to_list(opts.gmail_api_scopes)
+            if "oauth2_port" in gmail_api_config:
+                opts.gmail_api_oauth2_port = \
+                    gmail_api_config.get("oauth2_port", 8080)
 
     logger.setLevel(logging.WARNING)
 
@@ -919,7 +939,8 @@ def _main():
                 token_file=opts.gmail_api_token_file,
                 scopes=opts.gmail_api_scopes,
                 include_spam_trash=opts.gmail_api_include_spam_trash,
-                reports_folder=opts.mailbox_reports_folder
+                reports_folder=opts.mailbox_reports_folder,
+                oauth2_port=opts.gmail_api_oauth2_port
             )
 
         except Exception as error:
@@ -951,13 +972,6 @@ def _main():
     results = OrderedDict([("aggregate_reports", aggregate_reports),
                            ("forensic_reports", forensic_reports)])
 
-    if opts.output:
-        save_output(results, output_directory=opts.output,
-                    aggregate_json_filename=opts.aggregate_json_filename,
-                    forensic_json_filename=opts.forensic_json_filename,
-                    aggregate_csv_filename=opts.aggregate_csv_filename,
-                    forensic_csv_filename=opts.forensic_csv_filename)
-
     process_reports(results)
 
     if opts.smtp_host:
@@ -985,6 +999,7 @@ def _main():
                 archive_folder=opts.mailbox_archive_folder,
                 delete=opts.mailbox_delete,
                 test=opts.mailbox_test,
+                check_timeout=opts.mailbox_check_timeout,
                 nameservers=opts.nameservers,
                 dns_timeout=opts.dns_timeout,
                 strip_attachment_payloads=opts.strip_attachment_payloads,

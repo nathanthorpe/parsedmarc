@@ -1,4 +1,3 @@
-import logging
 from base64 import urlsafe_b64decode
 from functools import lru_cache
 from pathlib import Path
@@ -11,12 +10,11 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from parsedmarc.log import logger
 from parsedmarc.mail.mailbox_connection import MailboxConnection
 
-logger = logging.getLogger("parsedmarc")
 
-
-def _get_creds(token_file, credentials_file, scopes):
+def _get_creds(token_file, credentials_file, scopes, oauth2_port):
     creds = None
 
     if Path(token_file).exists():
@@ -29,7 +27,8 @@ def _get_creds(token_file, credentials_file, scopes):
         else:
             flow = InstalledAppFlow.from_client_secrets_file(
                 credentials_file, scopes)
-            creds = flow.run_local_server(open_browser=False)
+            creds = flow.run_local_server(open_browser=False,
+                                          oauth2_port=oauth2_port)
         # Save the credentials for the next run
         with Path(token_file).open('w') as token:
             token.write(creds.to_json())
@@ -42,8 +41,9 @@ class GmailConnection(MailboxConnection):
                  credentials_file: str,
                  scopes: List[str],
                  include_spam_trash: bool,
-                 reports_folder: str):
-        creds = _get_creds(token_file, credentials_file, scopes)
+                 reports_folder: str,
+                 oauth2_port: int):
+        creds = _get_creds(token_file, credentials_file, scopes, oauth2_port)
         self.service = build('gmail', 'v1', credentials=creds)
         self.include_spam_trash = include_spam_trash
         self.reports_label_id = self._find_label_id_for_label(reports_folder)

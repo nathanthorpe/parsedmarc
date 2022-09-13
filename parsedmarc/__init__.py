@@ -6,7 +6,6 @@ import binascii
 import email
 import email.utils
 import json
-import logging
 import mailbox
 import os
 import re
@@ -28,22 +27,15 @@ from expiringdict import ExpiringDict
 from lxml import etree
 from mailsuite.smtp import send_email
 
+from parsedmarc.log import logger
 from parsedmarc.mail import MailboxConnection
 from parsedmarc.utils import get_base_domain, get_ip_address_info
 from parsedmarc.utils import is_outlook_msg, convert_outlook_msg
 from parsedmarc.utils import parse_email
 from parsedmarc.utils import timestamp_to_human, human_timestamp_to_datetime
 
-__version__ = "8.3.0"
+__version__ = "8.3.1"
 
-formatter = logging.Formatter(
-    fmt='%(levelname)8s:%(filename)s:%(lineno)d:%(message)s',
-    datefmt='%Y-%m-%d:%H:%M:%S')
-handler = logging.StreamHandler()
-handler.setFormatter(formatter)
-
-logger = logging.getLogger("parsedmarc")
-logger.addHandler(handler)
 logger.debug("parsedmarc v{0}".format(__version__))
 
 feedback_report_regex = re.compile(r"^([\w\-]+): (.+)$", re.MULTILINE)
@@ -230,11 +222,14 @@ def parse_aggregate_report_xml(xml, ip_db_path=None, offline=False,
         xmltodict.parse(xml)["feedback"]
     except Exception as e:
         errors.append("Invalid XML: {0}".format(e.__str__()))
-        tree = etree.parse(
-            BytesIO(xml.encode('utf-8')),
-            etree.XMLParser(recover=True, resolve_entities=False))
-        s = etree.tostring(tree)
-        xml = '' if s is None else s.decode('utf-8')
+        try:
+            tree = etree.parse(
+                BytesIO(xml.encode('utf-8')),
+                etree.XMLParser(recover=True, resolve_entities=False))
+            s = etree.tostring(tree)
+            xml = '' if s is None else s.decode('utf-8')
+        except Exception:
+            xml = u'<a/>'
 
     try:
         # Replace XML header (sometimes they are invalid)
@@ -406,7 +401,7 @@ def parse_aggregate_report_file(_input, offline=False, ip_db_path=None,
                                 dns_timeout=2.0,
                                 parallel=False,
                                 keep_alive=None):
-    """Parses a file at the given path, a file-like object. or bytes as a
+    """Parses a file at the given path, a file-like object. or bytes as an
     aggregate DMARC report
 
     Args:
@@ -490,11 +485,11 @@ def parsed_aggregate_reports_to_csv_rows(reports):
             row["dmarc_aligned"] = record["alignment"]["dmarc"]
             row["disposition"] = record["policy_evaluated"]["disposition"]
             policy_override_reasons = list(map(
-                lambda r: r["type"],
+                lambda r_: r_["type"],
                 record["policy_evaluated"]
                 ["policy_override_reasons"]))
             policy_override_comments = list(map(
-                lambda r: r["comment"] or "none",
+                lambda r_: r_["comment"] or "none",
                 record["policy_evaluated"]
                 ["policy_override_reasons"]))
             row["policy_override_reasons"] = ",".join(
@@ -1266,6 +1261,41 @@ def watch_inbox(mailbox_connection: MailboxConnection,
                              check_timeout=check_timeout)
 
 
+def append_json(filename, reports):
+    with open(filename, "r+", newline="\n", encoding="utf-8") as output:
+        output_json = json.dumps(reports, ensure_ascii=False, indent=2)
+        if output.seek(0, os.SEEK_END) != 0:
+            if len(reports) == 0:
+                # not appending anything, don't do any dance to append it
+                # correctly
+                return
+            output.seek(output.tell() - 1)
+            last_char = output.read(1)
+            if last_char == "]":
+                # remove the trailing "\n]", leading "[\n", and replace with
+                # ",\n"
+                output.seek(output.tell() - 2)
+                output.write(",\n")
+                output_json = output_json[2:]
+            else:
+                output.seek(0)
+                output.truncate()
+
+        output.write(output_json)
+
+
+def append_csv(filename, csv):
+    with open(filename, "r+", newline="\n", encoding="utf-8") as output:
+        if output.seek(0, os.SEEK_END) != 0:
+            # strip the headers from the CSV
+            _headers, csv = csv.split("\n", 1)
+            if len(csv) == 0:
+                # not appending anything, don't do any dance to
+                # append it correctly
+                return
+        output.write(csv)
+
+
 def save_output(results, output_directory="output",
                 aggregate_json_filename="aggregate.json",
                 forensic_json_filename="forensic.json",
@@ -1292,33 +1322,17 @@ def save_output(results, output_directory="output",
     else:
         os.makedirs(output_directory)
 
-    with open("{0}"
-              .format(os.path.join(output_directory,
-                                   aggregate_json_filename)),
-              "w", newline="\n", encoding="utf-8") as agg_json:
-        agg_json.write(json.dumps(aggregate_reports, ensure_ascii=False,
-                                  indent=2))
+    append_json(os.path.join(output_directory, aggregate_json_filename),
+                aggregate_reports)
 
-    with open("{0}"
-              .format(os.path.join(output_directory,
-                                   aggregate_csv_filename)),
-              "w", newline="\n", encoding="utf-8") as agg_csv:
-        csv = parsed_aggregate_reports_to_csv(aggregate_reports)
-        agg_csv.write(csv)
+    append_csv(os.path.join(output_directory, aggregate_csv_filename),
+               parsed_aggregate_reports_to_csv(aggregate_reports))
 
-    with open("{0}"
-              .format(os.path.join(output_directory,
-                                   forensic_json_filename)),
-              "w", newline="\n", encoding="utf-8") as for_json:
-        for_json.write(json.dumps(forensic_reports, ensure_ascii=False,
-                                  indent=2))
+    append_json(os.path.join(output_directory, forensic_json_filename),
+                forensic_reports)
 
-    with open("{0}"
-              .format(os.path.join(output_directory,
-                                   forensic_csv_filename)),
-              "w", newline="\n", encoding="utf-8") as for_csv:
-        csv = parsed_forensic_reports_to_csv(forensic_reports)
-        for_csv.write(csv)
+    append_csv(os.path.join(output_directory, forensic_csv_filename),
+               parsed_forensic_reports_to_csv(forensic_reports))
 
     samples_directory = os.path.join(output_directory, "samples")
     if not os.path.exists(samples_directory):
